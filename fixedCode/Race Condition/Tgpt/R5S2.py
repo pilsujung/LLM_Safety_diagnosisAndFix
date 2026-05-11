@@ -1,0 +1,152 @@
+import threading
+import time
+import random
+from dataclasses import dataclass
+from collections import Counter, defaultdict
+
+
+@dataclass
+class Seat:
+    seat_id: int
+    booked_by: int | None = None
+
+
+class TicketOffice:
+    def __init__(self, n_seats: int):
+        self.seats = [Seat(i) for i in range(n_seats)]
+        self.bookings: list[tuple[int, int, float]] = []
+
+        self._lock = threading.Lock()
+
+    def book_one(self, customer_id: int) -> bool:
+        """
+        Atomically book exactly one seat for the given customer.
+        This is analogous to `synchronized void increment()` in the Java example.
+        """
+        with self._lock:
+            return self._book_impl(customer_id)
+
+    def _book_impl(self, customer_id: int) -> bool:
+
+        for seat in self.seats:
+            if seat.booked_by is None:
+
+                seat.booked_by = customer_id
+                self.bookings.append((seat.seat_id, customer_id, time.time()))
+                return True
+        return False
+
+
+class RaceDetector(threading.Thread):
+    def __init__(self, office: TicketOffice, stop_event: threading.Event, interval: float = 0.001):
+        super().__init__(daemon=True)
+        self.office = office
+        self.stop_event = stop_event
+        self.interval = interval
+        self.detected = False
+        self._reported_seats: set[int] = set()
+
+    def run(self):
+        total_seats = len(self.office.seats)
+        while not self.stop_event.is_set():
+
+            with self.office._lock:
+                snap = list(self.office.bookings)
+
+
+            if len(snap) > total_seats and not self.detected:
+                self.detected = True
+                print(f"[RACE DETECTED] bookings({len(snap)}) exceeded seats({total_seats}) => possible oversell.")
+
+
+            counts = Counter(seat_id for seat_id, _, _ in snap)
+            dups = [sid for sid, c in counts.items() if c > 1]
+            for sid in dups:
+                if sid in self._reported_seats:
+                    continue
+                self._reported_seats.add(sid)
+                buyers = [cid for s, cid, _ in snap if s == sid]
+                self.detected = True
+                print(f"[RACE DETECTED] seat {sid} sold multiple times: buyers={buyers}")
+            time.sleep(self.interval)
+
+
+def final_report(office: TicketOffice):
+
+    with office._lock:
+        seats = list(office.seats)
+        bookings = list(office.bookings)
+
+    total_seats = len(seats)
+
+    counts = Counter(seat_id for seat_id, _, _ in bookings)
+    dup_seats = sorted([sid for sid, c in counts.items() if c > 1])
+    oversold = max(0, len(bookings) - total_seats)
+
+    booked_in_state = {s.seat_id for s in seats if s.booked_by is not None}
+    booked_in_log = {sid for sid, _, _ in bookings}
+    state_only = sorted(booked_in_state - booked_in_log)
+    log_only = sorted(booked_in_log - booked_in_state)
+
+    dup_details = defaultdict(list)
+    for sid, cid, _ in bookings:
+        if counts[sid] > 1:
+            dup_details[sid].append(cid)
+
+    print("\n========== FINAL REPORT ==========")
+    print(f"- Total seats: {total_seats}")
+    print(f"- Successful booking log entries: {len(bookings)}")
+    print(f"- Oversold (log-based): {oversold}")
+    print(f"- Duplicate-sold seats: {dup_seats if dup_seats else 'None'}")
+    if dup_seats:
+        for sid in dup_seats[:10]:
+            print(f"  * Seat {sid}: buyer records={dup_details[sid]}")
+        if len(dup_seats) > 10:
+            print(f"  ... (showing 10 of {len(dup_seats)} duplicate seats)")
+
+    print(f"- Booked in seat state only (missing in log): {state_only if state_only else 'None'}")
+    print(f"- Present in log only (seat state still empty): {log_only if log_only else 'None'}")
+    print("=================================\n")
+
+
+def run_simulation(
+    n_seats: int = 5,
+    n_customers: int = 200,
+    attempts_per_customer: int = 5,
+):
+    office = TicketOffice(n_seats=n_seats)
+    stop_event = threading.Event()
+    detector = RaceDetector(office, stop_event)
+    detector.start()
+
+    start_barrier = threading.Barrier(n_customers + 1)
+
+    def customer_worker(customer_id: int):
+        start_barrier.wait()
+        for _ in range(attempts_per_customer):
+            if office.book_one(customer_id):
+                return
+
+            time.sleep(0)
+
+    threads = [
+        threading.Thread(target=customer_worker, args=(cid,), name=f"C{cid}")
+        for cid in range(n_customers)
+    ]
+    for t in threads:
+        t.start()
+
+    start_barrier.wait()
+    for t in threads:
+        t.join()
+
+    stop_event.set()
+    detector.join(timeout=0.1)
+
+    mode = "SAFE (locking enabled)"
+    print(f"\n[SIMULATION COMPLETE] mode={mode}, detector.detected={detector.detected}")
+    final_report(office)
+
+
+if __name__ == "__main__":
+    run_simulation()

@@ -1,0 +1,119 @@
+import threading
+import time
+from datetime import datetime
+
+shared_data = None
+lock = threading.Lock()
+
+
+writer_done = threading.Event()
+extra_writer_done = threading.Event()
+
+violations = []
+action_log = []
+
+def now():
+    return datetime.now().strftime('%H:%M:%S.%f')[:-3]
+
+def log(message):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+
+def record_action(who, action):
+    action_log.append((now(), who, action))
+
+def record_violation(who, reason):
+    ts = now()
+    violations.append((ts, who, reason))
+    log(f"[OrderViolation] {who}: {reason}")
+
+def writer():
+    """   """
+    global shared_data
+    record_action("Writer", "start")
+    log("[Writer] Writing data...")
+    time.sleep(1)
+
+    with lock:
+        shared_data = "Important Data"
+
+
+    writer_done.set()
+    record_action("Writer", "finished")
+    log("[Writer] Finished writing.")
+
+def reader():
+    """    - writer_done  """
+    record_action("Reader", "start")
+    log("[Reader] Waiting for writer to finish...")
+
+
+    writer_done.wait()
+
+    log("[Reader] Writer finished. Reading data...")
+    with lock:
+        if shared_data is None:
+
+            record_violation("Reader", "shared_data is None after writer_done")
+            log("[Reader] ERROR: Data should have been written but is None!")
+        else:
+            log(f"[Reader] Read data: {shared_data}")
+    record_action("Reader", "finished")
+
+def extra_writer():
+    """ /  -   writer  """
+    global shared_data
+
+
+    writer_done.wait()
+
+    record_action("ExtraWriter", "start")
+    log("[Extra Writer] Modifying data...")
+    time.sleep(3)
+
+    with lock:
+        shared_data = "Updated Data"
+
+
+    extra_writer_done.set()
+    record_action("ExtraWriter", "finished")
+    log("[Extra Writer] Finished modifying data.")
+
+def extra_reader():
+    """    - extra_writer_done  """
+    record_action("ExtraReader", "start")
+    log("[Extra Reader] Waiting for extra writer to finish...")
+
+
+    extra_writer_done.wait()
+
+    log("[Extra Reader] Extra writer finished. Reading updated data...")
+    with lock:
+        if shared_data is None:
+            record_violation("ExtraReader", "shared_data is None after extra_writer_done")
+            log("[Extra Reader] ERROR: Data should have been written but is None!")
+        else:
+            log(f"[Extra Reader] Read updated data: {shared_data}")
+    record_action("ExtraReader", "finished")
+
+
+
+thread1 = threading.Thread(target=writer)
+thread2 = threading.Thread(target=reader)
+thread3 = threading.Thread(target=extra_writer)
+thread4 = threading.Thread(target=extra_reader)
+
+thread1.start(); thread2.start(); thread3.start(); thread4.start()
+thread1.join();  thread2.join();  thread3.join();  thread4.join()
+
+log("[Main] Program finished.")
+
+print("\n===== ACTION LOG =====")
+for ts, who, action in action_log:
+    print(f"{ts} | {who:<12} | {action}")
+
+print("\n===== ORDER VIOLATIONS =====")
+if violations:
+    for ts, who, reason in violations:
+        print(f"{ts} | {who:<12} | {reason}")
+else:
+    print("No order violations detected.")
